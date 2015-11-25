@@ -8,13 +8,20 @@ __all__ =['ParallaxCoverageMetric','ParallaxHADegenMetric']
 
 class ParallaxCoverageMetric(BaseMetric):
     """
-    Check how well the parallax factor is distributed. Multiplies the parallax factor (between 0 and 1-ish)
-    with one minus the (weighted) average radius of the offset.
+    Check how well the parallax factor is distributed. subtracts the weighted mean position of the
+    parallax offsets, then computes the weighted mean radius of the points.
+    If points are well distributed, the radius will be near 1. If phase coverage is bad,
+    radius will be close to zero.
+
+    For points on the Ecliptic, uniform sampling should result in a metric value of ~0.5.
+    At the poles, uniform sampling would result in a metric value of ~1.
+
+    Also demand that there are obsevations above the snrLimit kwarg spanning thetaRange radians.
     """
     def __init__(self, metricName='ParallaxCoverageMetric', m5Col='fiveSigmaDepth',
                  mjdCol='expMJD', filterCol='filter', seeingCol='finSeeing',
                  rmag=20., SedTemplate='flat', badval=-666,
-                 atm_err=0.01, thetaRange=np.pi/2., snrLimit=5, **kwargs):
+                 atm_err=0.01, thetaRange=0., snrLimit=5, **kwargs):
 
         cols = ['ra_pi_amp', 'dec_pi_amp', m5Col, mjdCol, filterCol, seeingCol]
         units = 'ratio'
@@ -39,25 +46,6 @@ class ParallaxCoverageMetric(BaseMetric):
             self.mags = utils.stellarMags(SedTemplate, rmag=rmag)
         self.atm_err = atm_err
 
-    def _aveFactor(self, ra_pi_amp, dec_pi_amp, weights):
-        """
-        Find the average parallax factor:
-        1 is good, 0 is bad
-        """
-        radius = np.sqrt(ra_pi_amp**2 + dec_pi_amp**2 )
-        # sigma_r = sigma_ra = sigma_dec
-        return np.average(radius, weights=weights)
-
-    def _avePosition(self, ra_pi_amp, dec_pi_amp, weights):
-        """
-        Find the average parallax factor.
-        0 is good
-        1 is bad
-        """
-        ave_ra = np.average(ra_pi_amp, weights=weights)
-        ave_dec = np.average(dec_pi_amp, weights=weights)
-        ave_r = np.sqrt( ave_ra**2 + ave_dec**2)
-        return ave_r
 
     def _thetaCheck(self, ra_pi_amp, dec_pi_amp, snr):
         good = np.where(snr >= self.snrLimit)
@@ -80,40 +68,12 @@ class ParallaxCoverageMetric(BaseMetric):
         return weights
 
 
-    def weightedAngle(self, dec_pi_amp, ra_pi_amp, weights):
-        """ https://en.wikipedia.org/wiki/Mean_of_circular_quantities"""
-        thetaMean = np.arctan2(np.average(dec_pi_amp, weights=weights),
-                               np.average(ra_pi_amp, weights=weights))
-
-    # OK! If I subtract off the weighted mean position, then compute the mean radius of the points!
-
     def weightedR(self, dec_pi_amp, ra_pi_amp, weights):
         ycoord = dec_pi_amp-np.average(dec_pi_amp, weights=weights)
         xcoord = ra_pi_amp-np.average(ra_pi_amp,weights=weights)
         radius = np.sqrt(xcoord**2+ycoord**2)
         aveRad = np.average(radius, weights=weights)
         return aveRad
-
-
-    def thetaWeight(self, dec_pi_amp, ra_pi_amp, weights):
-        # We want theta to average to zero. And then theta+90 degrees to be zero
-
-        theta = np.arctan2(dec_pi_amp, ra_pi_amp)
-        theta[np.where(theta < 0)] = theta[np.where(theta < 0)]+2.*np.pi
-        theta = theta-np.min(theta)
-        theta = theta % 2.*np.pi
-        # weight between 0-1
-        thetaWeight1 = np.average(np.abs(theta), weights=weights)/np.pi
-
-        thetaWeight2 = np.average(np.abs(theta2), weights=weights)/np.pi
-
-
-
-
-    def radiusWeight(self, dec_pi_amp, ra_pi_amp, weights):
-        radius = np.sqrt(ave_ra**2 + ave_dec**2)
-        radiusWeighted = np.average(radius, weights=weights)
-
 
 
     def run(self, dataSlice, slicePoint=None):
@@ -129,16 +89,19 @@ class ParallaxCoverageMetric(BaseMetric):
             snr[good] = m52snr(self.mags[filt], dataSlice[self.m5Col][good])
 
         weights = self.computeWeights(dataSlice, snr)
-        aveFac = self._aveFactor(dataSlice['ra_pi_amp'], dataSlice['dec_pi_amp'], weights)
-        avePos = self._avePosition(dataSlice['ra_pi_amp'], dataSlice['dec_pi_amp'], weights)
-        thetaCheck = self._thetaCheck(dataSlice['ra_pi_amp'], dataSlice['dec_pi_amp'], snr)
-        result = (1-avePos)*aveFac*thetaCheck
+        aveR = self.weightedR(dataSlice['ra_pi_amp'], dataSlice['dec_pi_amp'], weights)
+        if self.thetaRange > 0:
+            thetaCheck = self._thetaCheck(dataSlice['ra_pi_amp'], dataSlice['dec_pi_amp'], snr)
+        else:
+            thetaCheck = 1.
+        result = aveR*thetaCheck
         return result
 
 
 class ParallaxHADegenMetric(BaseMetric):
     """
-    Check for degeneracy between parallax and DCR
+    Check for degeneracy between parallax and DCR.  Value of zero means there is no correlation.
+    Values of +/-1 mean correlation (or anti-correlation, which is probably just as bad).
     """
     def __init__(self, metricName='ParallaxHADegenMetric',haCol='HA', snrLimit=5.,
                  m5Col='fiveSigmaDepth', mjdCol='expMJD',
